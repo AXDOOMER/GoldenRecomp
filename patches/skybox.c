@@ -60,7 +60,7 @@ RECOMP_PATCH Gfx* sub_GAME_7F098A2C(Gfx* gdl, SkyRelated38* arg1, SkyRelated38* 
 
 #define PORTSKY 1
 
-#if 0
+#if 1
 RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
     coord3d sp6a4;
     coord3d sp698;
@@ -684,11 +684,13 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
 
                 matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
                 matrix_4x4_f32_to_s32(&mtx, mtx_render);
-                // mtxF2L(&mtx, mtx_render);
 
+                // RT64 performs real F3DEX2 clipping (not Fast3D-style trivial reject), so no
+                // "no-clipping" flag is needed. The sky fans aren't wound consistently though,
+                // so disable culling to keep every triangle.
                 gSPClearGeometryMode(gdl++, G_CULL_BOTH);
 
-                gSPMatrix(gdl++, OS_K0_TO_PHYSICAL(mtx_render), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
+                gSPMatrix(gdl++, osVirtualToPhysical(mtx_render), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
                 gSPVertex(gdl++, osVirtualToPhysical(verts), s1, 0);
 
                 for (i = 0; i < s1; i++) {
@@ -704,17 +706,18 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
                     verts[i].v.cn[3] = sp43c[i].a;
                 }
 
-                // gSP2Triangles(gdl++, 0, 1, 2, 0, 0, 2, 3, 0);
-
                 if (s1 == 4) {
-                    gDPTri2(gdl++, 0, 1, 3, 3, 2, 0);
+                    gSP1Triangle(gdl++, 0, 1, 3, 0);
+                    gSP1Triangle(gdl++, 0, 3, 2, 0);
                 } else if (s1 == 5) {
-                    gDPTri3(gdl++, 0, 1, 2, 0, 2, 3, 0, 3, 4);
+                    gSP1Triangle(gdl++, 0, 1, 2, 0);
+                    gSP1Triangle(gdl++, 0, 2, 3, 0);
+                    gSP1Triangle(gdl++, 0, 3, 4, 0);
                 } else if (s1 == 3) {
-                    gDPTri1(gdl++, 0, 1, 2);
+                    gSP1Triangle(gdl++, 0, 1, 2, 0);
                 }
 
-                // gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
+                gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
             }
 #endif
         }
@@ -1180,16 +1183,18 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
 #else
         {
             s32 i;
-            static Vtx verts[10] = {0};
-            // Col* cols = dynAllocate(s1 * sizeof(Col));
+            Vtx* verts = dynAllocate7F0BD6C4(s1);
             Mtxf mtx;
-            static Mtx mtx_render[10] = {0};
+            Mtx* mtx_render = dynAllocateMatrix();
+
             matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
             matrix_4x4_f32_to_s32(&mtx, mtx_render);
 
-            // gSPSetExtraGeometryModeEXT(gdl++, 0x00000100);
+            // RT64 clips properly, so just disable culling (the sky fans aren't wound
+            // consistently) and draw the cloud layer with ordinary textured triangles.
+            gSPClearGeometryMode(gdl++, G_CULL_BOTH);
+
             gSPMatrix(gdl++, osVirtualToPhysical(mtx_render), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
-            // gSPColor(gdl++, osVirtualToPhysical(cols), s1);
             gSPVertex(gdl++, osVirtualToPhysical(verts), s1, 0);
 
             for (i = 0; i < s1; ++i) {
@@ -1198,24 +1203,25 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
                 verts[i].v.ob[2] = sp4b4[i].unk08;
                 verts[i].v.tc[0] = skyClamp(sp4b4[i].unk0c, -32768.f, 32767.f);
                 verts[i].v.tc[1] = skyClamp(sp4b4[i].unk10, -32768.f, 32767.f);
-                // verts[i].colour = i * 4;
                 verts[i].v.cn[0] = sp4b4[i].r;
                 verts[i].v.cn[1] = sp4b4[i].g;
                 verts[i].v.cn[2] = sp4b4[i].b;
                 verts[i].v.cn[3] = sp4b4[i].a;
             }
-        }
 
-        if (s1 == 4) {
-            gDPTri2(gdl++, 0, 1, 3, 3, 2, 0);
-        } else if (s1 == 5) {
-            gDPTri3(gdl++, 0, 1, 2, 0, 2, 3, 0, 3, 4);
-        } else if (s1 == 3) {
-            gDPTri1(gdl++, 0, 1, 2);
-        }
+            if (s1 == 4) {
+                gSP1Triangle(gdl++, 0, 1, 3, 0);
+                gSP1Triangle(gdl++, 0, 3, 2, 0);
+            } else if (s1 == 5) {
+                gSP1Triangle(gdl++, 0, 1, 2, 0);
+                gSP1Triangle(gdl++, 0, 2, 3, 0);
+                gSP1Triangle(gdl++, 0, 3, 4, 0);
+            } else if (s1 == 3) {
+                gSP1Triangle(gdl++, 0, 1, 2, 0);
+            }
 
-        // gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
-        // gSPClearExtraGeometryModeEXT(gdl++, 0x00000100);
+            gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
+        }
     }
 #endif
 
