@@ -677,43 +677,49 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
             }
 #else
             {
+                // Draw the water/ground layer through the normal RSP pipeline as 2D
+                // screen-space triangles. The vanilla code does the RSP's transform work on
+                // the CPU and emits custom triangle commands straight to the RDP, which RT64
+                // can't execute -> black + hall-of-mirrors. Instead we reuse the vertices the
+                // game already projected to screen space (sp274[].unk28/unk2c, in quarter-
+                // pixels) and feed them through an orthographic projection, mirroring the
+                // in-game 2D path used by the watch gauge (bondviewRenderWatchGauge) and the
+                // menus. Because the coordinates are already 2D and on-screen, there is
+                // nothing left for RT64 to clip away.
                 s32 i;
                 Vtx* verts = dynAllocate7F0BD6C4(s1);
-                Mtxf mtx;
-                Mtx* mtx_render = dynAllocateMatrix();
+                Mtx* orthomtx = dynAllocateMatrix();
+                Mtx* viewmtx = dynAllocateMatrix();
+                Mtxf identf;
+                f32 sl = getPlayer_c_screenleft();
+                f32 st = getPlayer_c_screentop();
+                f32 sw = getPlayer_c_screenwidth();
+                f32 sh = getPlayer_c_screenheight();
 
-                matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
-                matrix_4x4_f32_to_s32(&mtx, mtx_render);
+                // Orthographic projection that is the inverse of the active player viewport,
+                // so a vertex placed at screen pixel (x, y) lands back at that pixel.
+                guOrtho(orthomtx, sl, sl + sw, st, st + sh, 1.0f, 10.0f, 1.0f);
 
-                // The vanilla sky is a software (FILL-mode) rasteriser, so the surrounding
-                // code leaves the RDP in G_CYC_FILL / G_RM_NOOP. RT64 honours that state and
-                // would refuse to rasterise these hardware triangles (black + hall-of-mirrors),
-                // so put the pipeline back into a normal textured 1-cycle state first.
+                matrix_4x4_set_identity(&identf);
+                matrix_4x4_f32_to_s32(&identf, viewmtx);
+
+                gDPPipeSync(gdl++);
                 gDPSetCycleType(gdl++, G_CYC_1CYCLE);
-                gDPSetTexturePersp(gdl++, G_TP_PERSP);
+                gDPSetTexturePersp(gdl++, G_TP_NONE);
                 gDPSetRenderMode(gdl++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
 
-                // The sky fans are wound inconsistently and use shade (not lit) vertex
-                // colours, so establish a clean, explicit geometry mode: no culling, no
-                // lighting/zbuffer/fog, just smooth shaded vertices.
                 gSPClearGeometryMode(gdl++, G_ZBUFFER | G_LIGHTING | G_FOG | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
                 gSPSetGeometryMode(gdl++, G_SHADE | G_SHADING_SMOOTH);
 
-                // The sky verts are scaled out to enormous distances and some sit behind the
-                // eye. RT64 does real F3DEX2 clipping, so (like the PC port's G_NO_CLIPPING_EXT
-                // under Fast3D) those triangles would be clipped away entirely -> hall of
-                // mirrors. Disable near-plane clipping across the sky draw if RT64 exposes it.
-#ifdef gEXSetNearClipping
-                gEXSetNearClipping(gdl++, 0);
-#endif
-
-                gSPMatrix(gdl++, osVirtualToPhysical(mtx_render), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
+                gSPMatrix(gdl++, osVirtualToPhysical(orthomtx), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+                gSPMatrix(gdl++, osVirtualToPhysical(viewmtx), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
                 gSPVertex(gdl++, osVirtualToPhysical(verts), s1, 0);
 
                 for (i = 0; i < s1; i++) {
-                    verts[i].v.ob[0] = sp43c[i].unk00;
-                    verts[i].v.ob[1] = sp43c[i].unk04;
-                    verts[i].v.ob[2] = sp43c[i].unk08;
+                    // unk28/unk2c are screen X/Y in quarter-pixels; * 0.25 -> pixels.
+                    verts[i].v.ob[0] = sp274[i].unk28 * 0.25f;
+                    verts[i].v.ob[1] = sp274[i].unk2c * 0.25f;
+                    verts[i].v.ob[2] = -5;
                     verts[i].v.tc[0] = skyClamp(sp43c[i].unk0c * 0.1f + g_SkyCloudOffset, -32768.f, 32767.f);
                     verts[i].v.tc[1] =
                         skyClamp((sp43c[i].unk10 - g_SkyCloudOffset) * 0.1f + g_SkyCloudOffset, -32768.f, 32767.f);
@@ -734,11 +740,10 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
                     gSP1Triangle(gdl++, 0, 1, 2, 0);
                 }
 
-#ifdef gEXSetNearClipping
-                gEXSetNearClipping(gdl++, 1);
-#endif
-
-                gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
+                // Restore the perspective projection the world geometry expects (set by
+                // viSetupCurrentPlayerView and recalled here exactly like the watch gauge).
+                gSPMatrix(gdl++, osVirtualToPhysical(currentPlayerGetProjectionMatrix()),
+                          G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
             }
 #endif
         }
@@ -1203,42 +1208,43 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
     }
 #else
         {
+            // Draw the cloud layer through the normal RSP pipeline as 2D screen-space
+            // triangles, using the vertices the game already projected to screen
+            // (sp94[].unk28/unk2c, quarter-pixels) with an orthographic projection. See the
+            // water block above and bondviewRenderWatchGauge for the same ortho-then-restore
+            // pattern. Pre-projected 2D coordinates leave nothing for RT64 to clip.
             s32 i;
             Vtx* verts = dynAllocate7F0BD6C4(s1);
-            Mtxf mtx;
-            Mtx* mtx_render = dynAllocateMatrix();
+            Mtx* orthomtx = dynAllocateMatrix();
+            Mtx* viewmtx = dynAllocateMatrix();
+            Mtxf identf;
+            f32 sl = getPlayer_c_screenleft();
+            f32 st = getPlayer_c_screentop();
+            f32 sw = getPlayer_c_screenwidth();
+            f32 sh = getPlayer_c_screenheight();
 
-            matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
-            matrix_4x4_f32_to_s32(&mtx, mtx_render);
+            guOrtho(orthomtx, sl, sl + sw, st, st + sh, 1.0f, 10.0f, 1.0f);
 
-            // The vanilla sky is a software (FILL-mode) rasteriser, so the surrounding code
-            // leaves the RDP in G_CYC_FILL with no usable render mode. RT64 honours that and
-            // won't draw these hardware triangles (black + hall-of-mirrors); restore a normal
-            // textured 1-cycle state before submitting the cloud layer.
+            matrix_4x4_set_identity(&identf);
+            matrix_4x4_f32_to_s32(&identf, viewmtx);
+
+            gDPPipeSync(gdl++);
             gDPSetCycleType(gdl++, G_CYC_1CYCLE);
-            gDPSetTexturePersp(gdl++, G_TP_PERSP);
+            gDPSetTexturePersp(gdl++, G_TP_NONE);
             gDPSetRenderMode(gdl++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
 
-            // Establish a clean, explicit geometry mode: no culling (the sky fans aren't
-            // wound consistently), no lighting/zbuffer/fog, just smooth shaded vertices.
             gSPClearGeometryMode(gdl++, G_ZBUFFER | G_LIGHTING | G_FOG | G_CULL_BOTH | G_TEXTURE_GEN | G_TEXTURE_GEN_LINEAR);
             gSPSetGeometryMode(gdl++, G_SHADE | G_SHADING_SMOOTH);
 
-            // The cloud verts are scaled out to huge distances with some behind the eye.
-            // RT64 does real F3DEX2 clipping (the PC port used G_NO_CLIPPING_EXT under
-            // Fast3D for the same reason), so disable near-plane clipping if available,
-            // otherwise the triangles get clipped away -> hall of mirrors.
-#ifdef gEXSetNearClipping
-            gEXSetNearClipping(gdl++, 0);
-#endif
-
-            gSPMatrix(gdl++, osVirtualToPhysical(mtx_render), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_PUSH);
+            gSPMatrix(gdl++, osVirtualToPhysical(orthomtx), G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
+            gSPMatrix(gdl++, osVirtualToPhysical(viewmtx), G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
             gSPVertex(gdl++, osVirtualToPhysical(verts), s1, 0);
 
             for (i = 0; i < s1; ++i) {
-                verts[i].v.ob[0] = sp4b4[i].unk00;
-                verts[i].v.ob[1] = sp4b4[i].unk04;
-                verts[i].v.ob[2] = sp4b4[i].unk08;
+                // unk28/unk2c are screen X/Y in quarter-pixels; * 0.25 -> pixels.
+                verts[i].v.ob[0] = sp94[i].unk28 * 0.25f;
+                verts[i].v.ob[1] = sp94[i].unk2c * 0.25f;
+                verts[i].v.ob[2] = -5;
                 verts[i].v.tc[0] = skyClamp(sp4b4[i].unk0c, -32768.f, 32767.f);
                 verts[i].v.tc[1] = skyClamp(sp4b4[i].unk10, -32768.f, 32767.f);
                 verts[i].v.cn[0] = sp4b4[i].r;
@@ -1258,11 +1264,9 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
                 gSP1Triangle(gdl++, 0, 1, 2, 0);
             }
 
-#ifdef gEXSetNearClipping
-            gEXSetNearClipping(gdl++, 1);
-#endif
-
-            gSPPopMatrix(gdl++, G_MTX_MODELVIEW);
+            // Restore the perspective projection the world geometry expects.
+            gSPMatrix(gdl++, osVirtualToPhysical(currentPlayerGetProjectionMatrix()),
+                      G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
         }
     }
 #endif
