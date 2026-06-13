@@ -685,6 +685,14 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
                 matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
                 matrix_4x4_f32_to_s32(&mtx, mtx_render);
 
+                // The vanilla sky is a software (FILL-mode) rasteriser, so the surrounding
+                // code leaves the RDP in G_CYC_FILL / G_RM_NOOP. RT64 honours that state and
+                // would refuse to rasterise these hardware triangles (black + hall-of-mirrors),
+                // so put the pipeline back into a normal textured 1-cycle state first.
+                gDPSetCycleType(gdl++, G_CYC_1CYCLE);
+                gDPSetTexturePersp(gdl++, G_TP_PERSP);
+                gDPSetRenderMode(gdl++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+
                 // RT64 performs real F3DEX2 clipping (not Fast3D-style trivial reject), so no
                 // "no-clipping" flag is needed. The sky fans aren't wound consistently though,
                 // so disable culling to keep every triangle.
@@ -1189,6 +1197,14 @@ RECOMP_PATCH Gfx* skyRender(Gfx* gdl) __attribute__((optnone)) {
 
             matrix_4x4_multiply(camGetWorldToScreenMtxf(), &dword_CODE_bss_80079E98, &mtx);
             matrix_4x4_f32_to_s32(&mtx, mtx_render);
+
+            // The vanilla sky is a software (FILL-mode) rasteriser, so the surrounding code
+            // leaves the RDP in G_CYC_FILL with no usable render mode. RT64 honours that and
+            // won't draw these hardware triangles (black + hall-of-mirrors); restore a normal
+            // textured 1-cycle state before submitting the cloud layer.
+            gDPSetCycleType(gdl++, G_CYC_1CYCLE);
+            gDPSetTexturePersp(gdl++, G_TP_PERSP);
+            gDPSetRenderMode(gdl++, G_RM_OPA_SURF, G_RM_OPA_SURF2);
 
             // RT64 clips properly, so just disable culling (the sky fans aren't wound
             // consistently) and draw the cloud layer with ordinary textured triangles.
